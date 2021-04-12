@@ -14,21 +14,34 @@
 #include <string.h>
 #include <unistd.h>
 #include <sys/types.h>
+#include <fontconfig/fontconfig.h>
 #include <X11/extensions/Xrandr.h>
+#include <X11/extensions/dpms.h>
+#include <X11/extensions/Xinerama.h>
 #include <X11/keysym.h>
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
+#include <security/pam_appl.h>
+#include <security/pam_misc.h>
 #include <X11/Xatom.h>
+#include <X11/Xft/Xft.h>
 
 #include "arg.h"
 #include "util.h"
 
 char *argv0;
+static int pam_conv(int num_msg, const struct pam_message **msg, struct pam_response **resp, void *appdata_ptr);
+struct pam_conv pamc = {pam_conv, NULL};
+char passwd[256];
+
+/* global count to prevent repeated error messages */
+int count_error = 0;
 
 enum {
 	INIT,
 	INPUT,
 	FAILED,
+    PAM,
 	NUMCOLS
 };
 
@@ -58,6 +71,32 @@ die(const char *errstr, ...)
 	exit(1);
 }
 
+static int
+pam_conv(int num_msg, const struct pam_message **msg,
+		struct pam_response **resp, void *appdata_ptr)
+{
+	int retval = PAM_CONV_ERR;
+	for(int i=0; i<num_msg; i++) {
+		if (msg[i]->msg_style == PAM_PROMPT_ECHO_OFF &&
+				strncmp(msg[i]->msg, "Password: ", 10) == 0) {
+			struct pam_response *resp_msg = malloc(sizeof(struct pam_response));
+			if (!resp_msg)
+				die("malloc failed\n");
+			char *password = malloc(strlen(passwd) + 1);
+			if (!password)
+				die("malloc failed\n");
+			memset(password, 0, strlen(passwd) + 1);
+			strcpy(password, passwd);
+			resp_msg->resp_retcode = 0;
+			resp_msg->resp = password;
+			resp[i] = resp_msg;
+			retval = PAM_SUCCESS;
+		}
+	}
+	return retval;
+}
+
+
 #ifdef __linux__
 #include <fcntl.h>
 #include <linux/oom.h>
@@ -65,21 +104,29 @@ die(const char *errstr, ...)
 static void
 writemessage(Display *dpy, Window win, int screen)
 {
-	int len, line_len, width, height, i, j, k, tab_replace, tab_size;
-	XGCValues gr_values;
-	XFontStruct *fontinfo;
-	XColor color, dummy;
-	GC gc;
-	fontinfo = XLoadQueryFont(dpy, text_size);
-	tab_size = 8 * XTextWidth(fontinfo, " ", 1);
+	int len, line_len, width, height, s_width, s_height, i, j, k, tab_replace, tab_size;
+	XftFont *fontinfo;
+	XftColor xftcolor;
+	XftDraw *xftdraw;
+	XGlyphInfo ext_msg, ext_space;
+	XineramaScreenInfo *xsi;
+	xftdraw = XftDrawCreate(dpy, win, DefaultVisual(dpy, screen), DefaultColormap(dpy, screen));
+	fontinfo = XftFontOpenName(dpy, screen, font_name);
+	XftColorAllocName(dpy, DefaultVisual(dpy, screen), DefaultColormap(dpy, screen), text_color, &xftcolor);
 
-	XAllocNamedColor(dpy, DefaultColormap(dpy, screen),
-			 text_color, &color, &dummy);
+	if (fontinfo == NULL) {
+		if (count_error == 0) {
+			fprintf(stderr, "slock: Unable to load font \"%s\"\n", font_name);
+			count_error++;
+		}
+		return;
+	}
 
-	gr_values.font = fontinfo->fid;
-	gr_values.foreground = color.pixel;
-	gc=XCreateGC(dpy,win,GCFont+GCForeground, &gr_values);
+	XftTextExtentsUtf8(dpy, fontinfo, (XftChar8 *) " ", 1, &ext_space);
+	tab_size = 8 * ext_space.width;
 
+	/*  To prevent "Uninitialized" warnings. */
+	xsi = NULL;
 
 	/*
 	 * Start formatting and drawing text
@@ -103,8 +150,18 @@ writemessage(Display *dpy, Window win, int screen)
 	if (line_len == 0)
 		line_len = len;
 
-	height = DisplayHeight(dpy, screen)*3/7 - (k*20)/3;
-	width  = (DisplayWidth(dpy, screen) - XTextWidth(fontinfo, message, line_len))/2;
+	if (XineramaIsActive(dpy)) {
+		xsi = XineramaQueryScreens(dpy, &i);
+		s_width = xsi[0].width;
+		s_height = xsi[0].height;
+	} else {
+		s_width = DisplayWidth(dpy, screen);
+		s_height = DisplayHeight(dpy, screen);
+	}
+
+	XftTextExtentsUtf8(dpy, fontinfo, (XftChar8 *)message, line_len, &ext_msg);
+	height = s_height*3/7 - (k*20)/3;
+	width  = (s_width - ext_msg.width)/2;
 
 	/* Look for '\n' and print the text between them. */
 	for (i = j = k = 0; i <= len; i++) {
@@ -116,7 +173,7 @@ writemessage(Display *dpy, Window win, int screen)
 				j++;
 			}
 
-			XDrawString(dpy, win, gc, width + tab_size*tab_replace, height + 20*k, message + j, i - j);
+			XftDrawStringUtf8(xftdraw, &xftcolor, fontinfo, width + tab_size*tab_replace, height + 20*k, (XftChar8 *)(message + j), i - j);
 			while (i < len && message[i] == '\n') {
 				i++;
 				j = i;
@@ -124,6 +181,14 @@ writemessage(Display *dpy, Window win, int screen)
 			}
 		}
 	}
+
+	/* xsi should not be NULL anyway if Xinerama is active, but to be safe */
+	if (XineramaIsActive(dpy) && xsi != NULL)
+			XFree(xsi);
+
+	XftFontClose(dpy, fontinfo);
+	XftColorFree(dpy, DefaultVisual(dpy, screen), DefaultColormap(dpy, screen), &xftcolor);
+	XftDrawDestroy(xftdraw);
 }
 
 
@@ -187,6 +252,8 @@ gethash(void)
 	}
 #endif /* HAVE_SHADOW_H */
 
+	/* pam, store user name */
+	hash = pw->pw_name;
 	return hash;
 }
 
@@ -195,11 +262,12 @@ readpw(Display *dpy, struct xrandr *rr, struct lock **locks, int nscreens,
        const char *hash)
 {
 	XRRScreenChangeNotifyEvent *rre;
-	char buf[32], passwd[256], *inputhash;
-	int num, screen, running, failure, oldc;
+	char buf[32];
+    int num, screen, running, failure, oldc, retval;
 	unsigned int len, color;
 	KeySym ksym;
 	XEvent ev;
+	pam_handle_t *pamh;
 
 	len = 0;
 	running = 1;
@@ -226,10 +294,26 @@ readpw(Display *dpy, struct xrandr *rr, struct lock **locks, int nscreens,
 			case XK_Return:
 				passwd[len] = '\0';
 				errno = 0;
-				if (!(inputhash = crypt(passwd, hash)))
-					fprintf(stderr, "slock: crypt: %s\n", strerror(errno));
+				retval = pam_start(pam_service, hash, &pamc, &pamh);
+				color = PAM;
+				for (screen = 0; screen < nscreens; screen++) {
+					XSetWindowBackground(dpy, locks[screen]->win, locks[screen]->colors[color]);
+					XClearWindow(dpy, locks[screen]->win);
+					XRaiseWindow(dpy, locks[screen]->win);
+				}
+				XSync(dpy, False);
+
+				if (retval == PAM_SUCCESS)
+					retval = pam_authenticate(pamh, 0);
+				if (retval == PAM_SUCCESS)
+					retval = pam_acct_mgmt(pamh, 0);
+
+				running = 1;
+				if (retval == PAM_SUCCESS)
+					running = 0;
 				else
-					running = !!strcmp(inputhash, hash);
+					fprintf(stderr, "slock: %s\n", pam_strerror(pamh, retval));
+				pam_end(pamh, retval);
 				if (running) {
 					XBell(dpy, 100);
 					failure = 1;
@@ -376,6 +460,7 @@ main(int argc, char **argv) {
 	const char *hash;
 	Display *dpy;
 	int s, nlocks, nscreens;
+    CARD16 standby, suspend, off;
 
 	ARGBEGIN {
 	case 'v':
@@ -404,10 +489,9 @@ main(int argc, char **argv) {
 	dontkillme();
 #endif
 
+	/* the contents of hash are used to transport the current user name */
 	hash = gethash();
 	errno = 0;
-	if (!crypt("", hash))
-		die("slock: crypt: %s\n", strerror(errno));
 
 	if (!(dpy = XOpenDisplay(NULL)))
 		die("slock: cannot open display\n");
@@ -441,6 +525,21 @@ main(int argc, char **argv) {
 	if (nlocks != nscreens)
 		return 1;
 
+	/* DPMS magic to disable the monitor */
+	if (!DPMSCapable(dpy))
+		die("slock: DPMSCapable failed\n");
+	if (!DPMSEnable(dpy))
+		die("slock: DPMSEnable failed\n");
+	if (!DPMSGetTimeouts(dpy, &standby, &suspend, &off))
+		die("slock: DPMSGetTimeouts failed\n");
+	if (!standby || !suspend || !off)
+		die("slock: at least one DPMS variable is zero\n");
+	if (!DPMSSetTimeouts(dpy, monitortime, monitortime, monitortime))
+		die("slock: DPMSSetTimeouts failed\n");
+
+	XSync(dpy, 0);
+
+
 	/* run post-lock command */
 	if (argc > 0) {
 		switch (fork()) {
@@ -457,6 +556,11 @@ main(int argc, char **argv) {
 
 	/* everything is now blank. Wait for the correct password */
 	readpw(dpy, &rr, locks, nscreens, hash);
+
+    /* reset DPMS values to inital ones */
+	DPMSSetTimeouts(dpy, standby, suspend, off);
+	XSync(dpy, 0);
+
 
 	return 0;
 }
