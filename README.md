@@ -1,8 +1,8 @@
 # slock - simple screen locker
 
-simple screen locker utility for X. 
+simple screen locker utility for X.
 
-![slock](https://i.imgur.com/2R315sM.gif)
+![slock](img/demo.gif)
 
 ## Requirements
 

@@ -6,7 +6,7 @@ include config.mk
 SRC = slock.c ${COMPATSRC}
 OBJ = ${SRC:.c=.o}
 
-all: options slock
+all: options config.h slock
 
 options:
 	@echo slock build options:
@@ -43,6 +43,7 @@ dist: clean
 
 install: all
 	@echo installing executable file to ${DESTDIR}${PREFIX}/bin
+	@cp config.def.h config.h
 	@mkdir -p ${DESTDIR}${PREFIX}/bin
 	@cp -f slock ${DESTDIR}${PREFIX}/bin
 	@chmod 755 ${DESTDIR}${PREFIX}/bin/slock
