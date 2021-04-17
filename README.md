@@ -4,6 +4,13 @@ simple screen locker utility for X.
 
 ![slock](img/demo.gif)
 
+Included in this build:
+
+- [DPMS Patch](https://tools.suckless.org/slock/patches/dpms/)
+- [PAM auth patch](https://tools.suckless.org/slock/patches/pam_auth/)
+- [Message patch](https://tools.suckless.org/slock/patches/message/)
+- Xft font support.
+
 ## Requirements
 
 In order to build slock you need the Xlib header files.
